@@ -59,9 +59,6 @@ playerinfo <- data %>%
   distinct(game_id, play_id, nfl_id, .keep_all = TRUE) %>%
   select(game_id, play_id, nfl_id, player_name, player_position, player_to_predict, player_side)
 
-outputs <- rbind(week1out,week2out, week3out, week4out, week5out, week6out, week7out, week8out,
-                 week9out, week10out, week11out, week12out, week13out, week14out, week15out, week16out,
-                 week17out, week18out)
 
 
 
@@ -75,9 +72,14 @@ outputsinfo <- outputs %>%
   ) %>%
   summarise(
     totalDef = sum(defense)
-  )
+  ) %>%
+  filter(totalDef == 0)
 
-summary(outputsinfo$totalDef)
+outputplays <- outputs %>%
+  distinct(game_id, play_id, .keep_all = TRUE)
+
+outputsDef <- outputs %>%
+  anti_join(outputsinfo, by = c("game_id", "play_id", "frame_id"))
 
 week1targs <- week1 %>%
   left_join(targetdata, by = c("game_id", "play_id", "nfl_id"))
@@ -142,7 +144,7 @@ distances <- distances %>%
                             (y - defenderY)^2)
   ) %>%
   filter(yac > 0, final_distance < 40, pass_length <= 10)
-  
+
 
 observe <- distances %>%
   select(player_name.x, player_name.y, x, y, defenderX, defenderY, yac, final_distance, )
@@ -170,7 +172,7 @@ output_players = outputs_updated_frames %>% select(game_id,play_id,nfl_id) %>% d
 
 data_only_in_out = data %>% 
   semi_join(output_players, by = c("game_id","play_id","nfl_id"))
-  
+
 
 joined_distances = rbind(select(data_only_in_out,colnames(outputs_updated_frames)),outputs_updated_frames)
 
@@ -218,3 +220,30 @@ targeted_distance_vs_sumer = target_defender %>%
   arrange(game_id, play_id, nfl_id)
 
 summarise(targeted_distance_vs_sumer, sumer = mean(sumer), dist = mean(dist))
+
+#distance to receiver
+
+joinedoutputs479 <- joinedoutputs479 %>%
+  left_join(balllands, by = c("game_id", "play_id"))
+joinedoutputs479 <- joinedoutputs479 %>%
+  group_by(game_id, play_id) %>%
+  mutate(
+    distanceReceiver = sqrt((defenderX - x)^2 + (defenderY - y)^2),
+    distanceBall = sqrt((defenderX - ball_land_x)^2 + (defenderY - ball_land_y)^2)
+  )
+#instantaneous velocity towards receiver vs towards ball at each frame calculated in ROC's
+#feel free to double check this calculation
+ROCs <- joinedoutputs479 %>%
+  group_by(game_id, play_id, defenderId) %>%
+  mutate(
+    close_rec_inst = (distanceReceiver - lead(distanceReceiver)) / 0.1,
+    close_ball_inst = (distanceBall - lead(distanceBall)) / 0.1,
+    
+    close_rec_inst = ifelse(is.infinite(close_rec_inst) | is.nan(close_rec_inst), NA, close_rec_inst),
+    close_ball_inst = ifelse(is.infinite(close_ball_inst) | is.nan(close_ball_inst), NA, close_ball_inst)
+  )
+
+ROCjoined <- ROCs %>%
+  left_join(distances, by = c("game_id", "play_id"))
+
+
