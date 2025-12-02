@@ -5,6 +5,54 @@ library(dplyr)
 
 targetdata <- read_parquet("sumer_coverages_player_play.parquet")
 
+supdata <- read.csv("114239_nfl_competition_files_published_analytics_final/supplementary_data.csv")
+week1 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w01.csv")
+week1out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w01.csv")
+week2out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w02.csv")
+week3out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w03.csv")
+week4out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w04.csv")
+week5out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w05.csv")
+week6out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w06.csv")
+week7out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w07.csv")
+week8out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w08.csv")
+week9out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w09.csv")
+week10out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w10.csv")
+week11out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w11.csv")
+week12out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w12.csv")
+week13out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w13.csv")
+week14out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w14.csv")
+week15out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w15.csv")
+week16out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w16.csv")
+week17out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w17.csv")
+week18out <- read.csv("114239_nfl_competition_files_published_analytics_final/train/output_2023_w18.csv")
+
+
+week2 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w02.csv")
+week3 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w03.csv")
+week4 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w04.csv")
+week5 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w05.csv")
+week6 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w06.csv")
+week7 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w07.csv")
+week8 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w08.csv")
+week9 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w09.csv")
+week10 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w10.csv")
+week11 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w11.csv")
+week12 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w12.csv")
+week13 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w13.csv")
+week14 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w14.csv")
+week15 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w15.csv")
+week16 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w16.csv")
+week17 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w17.csv")
+week18 <- read.csv("114239_nfl_competition_files_published_analytics_final/train/input_2023_w18.csv")
+
+
+data <- rbind(week1, week2,week3,week4, week5, week6, week7, week8, week9,week10, week11, week12, 
+              week13, week14, week15, week16, week17, week18)
+outputs <- rbind(week1out,week2out, week3out, week4out, week5out, week6out, week7out, week8out,
+                 week9out, week10out, week11out, week12out, week13out, week14out, week15out, week16out,
+                 week17out, week18out)
+
+
 write.csv(targetdata, "SumerSupplementData.csv", row.names = FALSE)
 
 playerinfo <- data %>%
@@ -112,4 +160,5 @@ ggplot(distances, aes(final_distance, yac)) +
     x = "Final Defender–Receiver Distance",
     y = "Yards After Catch"
   )
+
 
