@@ -162,3 +162,59 @@ ggplot(distances, aes(final_distance, yac)) +
   )
 
 
+# distances between player and ball
+
+outputs_updated_frames = outputs %>% mutate(frame_id = frame_id+100)
+
+output_players = outputs_updated_frames %>% select(game_id,play_id,nfl_id) %>% distinct()
+
+data_only_in_out = data %>% 
+  semi_join(output_players, by = c("game_id","play_id","nfl_id"))
+  
+
+joined_distances = rbind(select(data_only_in_out,colnames(outputs_updated_frames)),outputs_updated_frames)
+
+ball_land = data %>% 
+  select(game_id,play_id,ball_land_x,ball_land_y) %>% 
+  distinct()
+
+joined_distances = joined_distances %>% 
+  left_join(ball_land,by = c("game_id","play_id")) %>% 
+  mutate(distance_ball = sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2)) 
+
+target_defender = joined_distances %>% 
+  filter(player_side == "Defense") %>% 
+  group_by(game_id, play_id,nfl_id) %>%
+  slice_max(order_by = frame_id, n = 1, with_ties = FALSE) %>%
+  ungroup() %>% 
+  group_by(game_id, play_id) %>% 
+  slice_max(order_by = -distance_ball, n=1,with_ties = FALSE) %>% 
+  ungroup() %>% 
+  select(game_id,play_id,nfl_id) %>% 
+  mutate(dist = TRUE)
+
+player_names = data_only_in_out %>% 
+  select(nfl_id,player_name,player_position) %>% 
+  distinct()
+
+select_distances = joined_distances %>% 
+  filter(player_side == "Defense") %>% 
+  group_by(game_id, play_id,nfl_id) %>%
+  slice_max(order_by = frame_id, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(game_id,play_id,nfl_id, distance_ball)
+
+
+sumer_targ_def = sumer_sup %>% 
+  filter(targeted_defender) %>% 
+  select(game_id,play_id,nfl_id) %>% 
+  mutate(sumer = TRUE)
+
+targeted_distance_vs_sumer = target_defender %>% 
+  full_join(sumer_targ_def, by = c("game_id","play_id","nfl_id")) %>%
+  left_join(player_names, by = "nfl_id") %>% 
+  left_join(select_distances, by = c("game_id","play_id","nfl_id")) %>% 
+  mutate(sumer = replace_na(sumer, FALSE), dist = replace_na(dist,FALSE)) %>% 
+  arrange(game_id, play_id, nfl_id)
+
+summarise(targeted_distance_vs_sumer, sumer = mean(sumer), dist = mean(dist))
