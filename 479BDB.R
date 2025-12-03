@@ -103,7 +103,20 @@ defenders479 <- targs %>%
 joined479 <- inner_join(receivers479, defenders479, by = c("game_id", "play_id", "frame_id"))
 
 
-outputs479 <- outputs %>%
+joined479 <- joined479 %>%
+  # compute inputDistance per frame
+  mutate(inputDistance = sqrt((x - defenderX)^2 + (y - defenderY)^2)) %>%
+  group_by(game_id, play_id) %>%
+  arrange(frame_id, .by_group = TRUE) %>%
+  # compute valid flag based on the last frame distance of the play
+  mutate(
+    lastDistance = last(inputDistance),
+    valid = ifelse(lastDistance >= 2,1, 0)
+  ) %>%
+  ungroup() %>%
+  filter(valid == 1)
+  
+outputs479 <- outputsDef %>%
   semi_join(joined479, by = c("game_id", "play_id"))
 
 receiversoutputs479 <- outputs479 %>%
@@ -143,7 +156,7 @@ distances <- distances %>%
     final_distance = sqrt((x - defenderX)^2 +
                             (y - defenderY)^2)
   ) %>%
-  filter(yac > 0, final_distance < 40, pass_length <= 10)
+  filter(final_distance < 40, pass_length <= 20)
 
 
 observe <- distances %>%
@@ -244,6 +257,115 @@ ROCs <- joinedoutputs479 %>%
   )
 
 ROCjoined <- ROCs %>%
-  left_join(distances, by = c("game_id", "play_id"))
+  left_join(distances, by = c("game_id", "play_id")) %>%
+  filter(!is.na(yards_to_go)) %>%
+  mutate(
+    target = ifelse(yac >= 4, 1, 0),
+    angle_def_vel = atan2((lead(defenderY.x) - defenderY.x) / 0.1, (lead(defenderX.x) - defenderX.x) / 0.1),
+    angle_def_to_rec = atan2(y.x - defenderY.x, x.x - defenderX.x),
+    angle_diff = atan2(sin(angle_def_vel - angle_def_to_rec), cos(angle_def_vel - angle_def_to_rec))
+  ) 
+
+ROC5 <- ROCjoined %>%
+  arrange(game_id, play_id, frame_id.x) %>%
+  group_by(game_id, play_id) %>%
+  slice_tail(n = 5) %>%     
+  ungroup()
+ 
+str(ROCjoined$game_id)
+str(ROCjoined$play_id)
+
+ROC5 <- ROC5 %>%
+  mutate(
+    game_id = as.character(game_id),
+    play_id = as.character(play_id)
+  )
+
+unique_plays <- ROC5 %>% 
+  distinct(game_id, play_id) %>%
+  ungroup()
+
+set.seed(2015)
+
+train_plays <- unique_plays %>% 
+  sample_frac(0.8)  
+
+test_plays <- anti_join(unique_plays, train_plays,
+                        by = c("game_id", "play_id"))
+
+train_df <- ROC5 %>% 
+  inner_join(train_plays, by = c("game_id", "play_id"))
+
+test_df <- ROC5 %>% 
+  inner_join(test_plays, by = c("game_id", "play_id"))
+
+features <- c("close_rec_inst", "angle_def_to_rec", "final_distance", "distanceReceiver")
+
+train_df <- train_df %>%
+  filter(!is.na(close_rec_inst), !is.na(close_ball_inst))
+
+test_df <- test_df %>%
+  filter(!is.na(close_rec_inst), !is.na(close_ball_inst))
 
 
+train_matrix <- model.matrix(~ . - 1, data = train_df[, features])
+test_matrix  <- model.matrix(~ . - 1, data = test_df[, features])
+
+dtrain <- xgb.DMatrix(train_matrix, label = train_df$target)
+dtest  <- xgb.DMatrix(test_matrix,  label = test_df$target)
+
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 4,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 300,
+  watchlist = list(train = dtrain, test = dtest),
+  print_every_n = 50,
+  early_stopping_rounds = 20
+)
+
+test_df$pred_prob <- predict(model, dtest)
+
+check <- test_df %>%
+  filter(game_id == 2023090700, play_id == 194)
+
+check <- check %>%
+  select(target, pred_prob)
+
+true_y <- test_df$target 
+
+
+library(pROC)
+roc_obj <- roc(true_y, test_df$pred_prob)
+auc(roc_obj)
+plot(roc_obj)
+
+
+brier <- mean((test_df$pred_prob - true_y)^2)
+brier
+
+xgb.importance(feature_names = colnames(train_matrix), model = model) %>%
+  xgb.plot.importance(top_n = 10)
+
+
+play_swings <- test_df %>%
+  group_by(game_id, play_id) %>%
+  arrange(frame_id.x, .by_group = TRUE) %>%
+  summarise(
+    start_prob = first(pred_prob),
+    end_prob   = last(pred_prob),
+    delta_prob = end_prob - start_prob,
+    abs_delta  = abs(end_prob - start_prob)
+  )
+
+
+#Visualizations - why does YAC matter? what can DB's do to prevent YAC, when does YAC occur, show DB's and their EPA per coverage target in the dataframe compared to their YAC allowed
+#GIF - show how probability of YAC changes based on DB movements and path. show an alternative path and what it woudlve been in that case
