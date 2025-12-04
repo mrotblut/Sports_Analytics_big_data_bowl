@@ -82,7 +82,6 @@ ggplot()  +
         axis.title = element_blank(),
         axis.ticks = element_blank())+
   scale_color_manual(values = c(Defense = "#C83803", Offense = "#A5ACAF"))+
-  transition_time(frame_id)+
   annotate("segment", 
          x = 15,
          xend = 65,
@@ -95,3 +94,4 @@ ggplot()  +
     ease_aes("linear") +
     coord_cartesian(xlim = c(35, 75), ylim = c(0, 160 / 3), expand = FALSE)+
   anim_save("Play.gif")
+
