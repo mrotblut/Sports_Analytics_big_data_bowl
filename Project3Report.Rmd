@@ -1,0 +1,696 @@
+---
+title: "Predicting YAC"
+author: "Shekhar Shah, Max Rotblut, Samuel Negus, Joshua Leffel"
+date: "2025-12-05"
+output: html_document
+---
+
+# Executive Summary
+
+In the NFL today, most interest is directed towards the offense, even when it comes to advanced analytics. Naturally, we were inspired to complete a study that can benefit the defense while also speaking volumes to what the offense is doing. This study allowed us to better understand how defensive positioning and movement affect yards after catch (YAC) on completed pass plays in the NFL. YAC is a critical component of offensive success, often determining whether a short completion becomes a routine gain or an explosive play. By analyzing player tracking data from the 2023 NFL season, we quantified how close defenders are to receivers at the moment of the catch, understood the likely objective of the defender based on their movement direction and speed, and how these factors influence the likelihood and magnitude of YAC.
+
+Using the play-by-play data, we identified targeted receivers and their primary defenders on each completed pass. For each play, we constructed spatial features such as the final distance between the defender and receiver at the catch point and directional alignment between the two players. We also built dynamic features that measure how quickly defenders are closing toward the receiver in the moments leading up to the catch. YAC was defined as total yards gained minus air yards, and a binary outcome was created to indicate whether a play resulted in at least four yards after the catch.
+
+To model the probability of generating meaningful YAC, we trained an XGBoost classification model using these spatial and motion-based features. Our results showed that a defender’s closing speed, final separation distance, and directional alignment are among the most influential predictors of YAC outcomes. We also estimated a regression model to explain actual YAC using the model’s predicted probabilities along with situational football variables such as down, yards to go, pass length, and coverage type. The results confirm that defensive proximity and movement significantly impact post-catch production even after considering situational context.
+
+Overall, this project demonstrates that defender positioning and reactive movement play a measurable and meaningful role in limiting YAC. These findings provide actionable insight for defensive coaching, particularly in emphasizing pursuit angles, closing speed, and leverage at the point of catch to reduce explosive plays.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+library(arrow)
+library(ggplot2)
+library(dplyr)
+library(xgboost)
+library(tidyr)
+
+supdata <- read.csv("supplementary_data.csv")
+week1 <- read.csv("train/input_2023_w01.csv")
+
+week1out <- read.csv("train/output_2023_w01.csv")
+week2out <- read.csv("train/output_2023_w02.csv")
+week3out <- read.csv("train/output_2023_w03.csv")
+week4out <- read.csv("train/output_2023_w04.csv")
+week5out <- read.csv("train/output_2023_w05.csv")
+week6out <- read.csv("train/output_2023_w06.csv")
+week7out <- read.csv("train/output_2023_w07.csv")
+week8out <- read.csv("train/output_2023_w08.csv")
+week9out <- read.csv("train/output_2023_w09.csv")
+week10out <- read.csv("train/output_2023_w10.csv")
+week11out <- read.csv("train/output_2023_w11.csv")
+week12out <- read.csv("train/output_2023_w12.csv")
+week13out <- read.csv("train/output_2023_w13.csv")
+week14out <- read.csv("train/output_2023_w14.csv")
+week15out <- read.csv("train/output_2023_w15.csv")
+week16out <- read.csv("train/output_2023_w16.csv")
+week17out <- read.csv("train/output_2023_w17.csv")
+week18out <- read.csv("train/output_2023_w18.csv")
+
+week2 <- read.csv("train/input_2023_w02.csv")
+week3 <- read.csv("train/input_2023_w03.csv")
+week4 <- read.csv("train/input_2023_w04.csv")
+week5 <- read.csv("train/input_2023_w05.csv")
+week6 <- read.csv("train/input_2023_w06.csv")
+week7 <- read.csv("train/input_2023_w07.csv")
+week8 <- read.csv("train/input_2023_w08.csv")
+week9 <- read.csv("train/input_2023_w09.csv")
+week10 <- read.csv("train/input_2023_w10.csv")
+week11 <- read.csv("train/input_2023_w11.csv")
+week12 <- read.csv("train/input_2023_w12.csv")
+week13 <- read.csv("train/input_2023_w13.csv")
+week14 <- read.csv("train/input_2023_w14.csv")
+week15 <- read.csv("train/input_2023_w15.csv")
+week16 <- read.csv("train/input_2023_w16.csv")
+week17 <- read.csv("train/input_2023_w17.csv")
+week18 <- read.csv("train/input_2023_w18.csv")
+
+targetdata <- read.csv("SumerSupplementData.csv")
+
+data <- rbind(week1, week2,week3,week4, week5, week6, week7, week8, week9,week10, week11, week12, 
+              week13, week14, week15, week16, week17, week18)
+outputs <- rbind(week1out,week2out, week3out, week4out, week5out, week6out, week7out, week8out,
+                 week9out, week10out, week11out, week12out, week13out, week14out, week15out, week16out,
+                 week17out, week18out)
+
+playerinfo <- data %>%
+  distinct(game_id, play_id, nfl_id, .keep_all = TRUE) %>%
+  select(game_id, play_id, nfl_id, player_name, player_position, player_to_predict, player_side)
+```
+
+```{r}
+outputs <- outputs %>%
+  left_join(playerinfo, by = c("game_id", "play_id", "nfl_id"))
+
+outputsinfo <- outputs %>%
+  group_by(game_id,play_id, frame_id) %>%
+  mutate(
+    defense = (ifelse(player_side == "Defense", 1, 0))
+  ) %>%
+  summarise(
+    totalDef = sum(defense)
+  ) %>%
+  filter(totalDef == 0)
+
+outputplays <- outputs %>%
+  distinct(game_id, play_id, .keep_all = TRUE)
+
+outputsDef <- outputs %>%
+  anti_join(outputsinfo, by = c("game_id", "play_id", "frame_id"))
+```
+
+```{r}
+week1targs <- week1 %>%
+  left_join(targetdata, by = c("game_id", "play_id", "nfl_id"))
+
+week1targs <- week1targs %>%
+  filter(player_role == "Targeted Receiver" |  targeted_defender == TRUE)
+
+targs <- data %>%
+  left_join(targetdata, by = c("game_id", "play_id", "nfl_id"))
+
+receivers479 <- targs %>%
+  filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, frame_id, nfl_id, player_name, x, y, player_position, recDir = dir, ball_land_x, ball_land_y)
+
+# Get defenders at the same frame
+defenders479 <- targs %>%
+  filter(targeted_defender == TRUE) %>%
+  select(game_id, play_id, frame_id, player_name, defenderId = nfl_id, defenderY = y, defenderX = x, player_position, dbDir = dir)
+
+joined479 <- inner_join(receivers479, defenders479, by = c("game_id", "play_id", "frame_id"))
+
+angle_diff <- function(a, b) {
+  diff <- abs(a - b) %% 360
+  ifelse(diff > 180, 360 - diff, diff)
+}
+
+joined479 <- joined479 %>%
+  # compute inputDistance per frame
+  mutate(inputDistance = sqrt((x - defenderX)^2 + (y - defenderY)^2),
+         dirDiff = angle_diff(recDir, dbDir)
+  ) %>%
+  group_by(game_id, play_id) %>%
+  arrange(frame_id, .by_group = TRUE) %>%
+  # compute valid flag based on the last frame distance of the play
+  mutate(
+    lastDistance = last(inputDistance),
+    lastdirDiff = last(dirDiff),
+    valid = ifelse(lastDistance >= 2,1, 0)
+  ) %>%
+  ungroup() %>%
+  filter(valid == 1)
+
+dirDiffs <- joined479 %>%
+  distinct(game_id, play_id, .keep_all = TRUE) %>%
+  select(game_id, play_id, lastdirDiff)
+  
+outputs479 <- outputsDef %>%
+  semi_join(joined479, by = c("game_id", "play_id"))
+
+receiversoutputs479 <- outputs479 %>%
+  filter(player_position %in% c("RB", "WR", "TE")) %>%
+  select(game_id, play_id, frame_id, nfl_id, player_name, x, y, player_position)
+
+# Get defenders at the same frame
+defendersoutputs479 <- outputs479 %>%
+  filter(player_position %in% c("CB", "SS","FS", "DB", "ILB", "LB", "MLB")) %>%
+  select(game_id, play_id, frame_id, player_name, defenderId = nfl_id, defenderY = y, defenderX = x, player_position)
+
+joinedoutputs479 <- inner_join(receiversoutputs479, defendersoutputs479, by = c("game_id", "play_id", "frame_id"))
+
+
+joinedoutputs479 <- joinedoutputs479 %>%
+  left_join(targetdata, by = c("game_id", "play_id", "defenderId" = "nfl_id"))
+
+joinedoutputs479 <- joinedoutputs479 %>%
+  filter(targeted_defender == "TRUE")
+
+multi_defender_plays <- joinedoutputs479 %>%
+  group_by(game_id, play_id, nfl_id) %>%        # group by play + receiver
+  summarise(num_defenders = n_distinct(defenderId), .groups = "drop") %>%
+  filter(num_defenders > 1)
+
+joinedoutputs479 <- joinedoutputs479 %>%
+  anti_join(multi_defender_plays,
+            by = c("game_id", "play_id", "nfl_id"))
+```
+
+```{r}
+final_frame_df <- joinedoutputs479 %>%
+  group_by(game_id, play_id) %>%
+  slice_max(order_by = frame_id, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+distances <- final_frame_df %>%
+  left_join(supdata, by = c("game_id", "play_id"))
+
+colnames(supdata)
+
+distances <- distances %>%
+  filter(!grepl("fumble", play_description, ignore.case = TRUE)) %>%
+  filter(pass_result == "C", is.na(penalty_yards))%>%
+  mutate(
+    yac = yards_gained - pass_length,
+    final_distance = sqrt((x - defenderX)^2 +
+                            (y - defenderY)^2)
+  ) %>%
+  filter(final_distance < 40, pass_length <= 20)
+
+
+observe <- distances %>%
+  select(player_name.x, player_name.y, x, y, defenderX, defenderY, yac, final_distance, )
+```
+
+```{r}
+model <- lm(yac ~ final_distance, data = distances)
+summary(model)
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(distances, aes(final_distance, yac)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Relationship Between Defender Distance at Final Frame and YAC",
+    x = "Final Defender–Receiver Distance",
+    y = "Yards After Catch"
+  )
+```
+
+```{r}
+outputs_updated_frames = outputs %>% mutate(frame_id = frame_id+100)
+
+output_players = outputs_updated_frames %>% select(game_id,play_id,nfl_id) %>% distinct()
+
+data_only_in_out = data %>% 
+  semi_join(output_players, by = c("game_id","play_id","nfl_id"))
+
+
+joined_distances = rbind(select(data_only_in_out,colnames(outputs_updated_frames)),outputs_updated_frames)
+
+ball_land = data %>% 
+  select(game_id,play_id,ball_land_x,ball_land_y) %>% 
+  distinct()
+
+joined_distances = joined_distances %>% 
+  left_join(ball_land,by = c("game_id","play_id")) %>% 
+  mutate(distance_ball = sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2)) 
+
+target_defender = joined_distances %>% 
+  filter(player_side == "Defense") %>% 
+  group_by(game_id, play_id,nfl_id) %>%
+  slice_max(order_by = frame_id, n = 1, with_ties = FALSE) %>%
+  ungroup() %>% 
+  group_by(game_id, play_id) %>% 
+  slice_max(order_by = -distance_ball, n=1,with_ties = FALSE) %>% 
+  ungroup() %>% 
+  select(game_id,play_id,nfl_id) %>% 
+  mutate(dist = TRUE)
+
+player_names = data_only_in_out %>% 
+  select(nfl_id,player_name,player_position) %>% 
+  distinct()
+
+select_distances = joined_distances %>% 
+  filter(player_side == "Defense") %>% 
+  group_by(game_id, play_id,nfl_id) %>%
+  slice_max(order_by = frame_id, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(game_id,play_id,nfl_id, distance_ball)
+
+
+sumer_targ_def = targetdata %>% 
+  filter(targeted_defender) %>% 
+  select(game_id,play_id,nfl_id) %>% 
+  mutate(sumer = TRUE)
+
+targeted_distance_vs_sumer = target_defender %>% 
+  full_join(sumer_targ_def, by = c("game_id","play_id","nfl_id")) %>%
+  left_join(player_names, by = "nfl_id") %>% 
+  left_join(select_distances, by = c("game_id","play_id","nfl_id")) %>% 
+  mutate(sumer = replace_na(sumer, FALSE), dist = replace_na(dist,FALSE)) %>% 
+  arrange(game_id, play_id, nfl_id)
+
+summarise(targeted_distance_vs_sumer, sumer = mean(sumer), dist = mean(dist))
+```
+
+```{r}
+#distance to receiver
+
+joinedoutputs479 <- joinedoutputs479 %>%
+  left_join(ball_land, by = c("game_id", "play_id"))
+joinedoutputs479 <- joinedoutputs479 %>%
+  group_by(game_id, play_id) %>%
+  mutate(
+    distanceReceiver = sqrt((defenderX - x)^2 + (defenderY - y)^2),
+    distanceBall = sqrt((defenderX - ball_land_x)^2 + (defenderY - ball_land_y)^2)
+  )
+#instantaneous velocity towards receiver vs towards ball at each frame calculated in ROC's
+#feel free to double check this calculation
+ROCs <- joinedoutputs479 %>%
+  group_by(game_id, play_id, defenderId) %>%
+  mutate(
+    close_rec_inst = (distanceReceiver - lead(distanceReceiver)) / 0.1,
+    close_ball_inst = (distanceBall - lead(distanceBall)) / 0.1,
+    
+    close_rec_inst = ifelse(is.infinite(close_rec_inst) | is.nan(close_rec_inst), NA, close_rec_inst),
+    close_ball_inst = ifelse(is.infinite(close_ball_inst) | is.nan(close_ball_inst), NA, close_ball_inst)
+  )
+```
+
+```{r}
+ROCjoined <- ROCs %>%
+  left_join(distances, by = c("game_id", "play_id")) %>%
+  filter(!is.na(yards_to_go)) %>%
+  mutate(
+    target = ifelse(yac >= 4, 1, 0),
+    angle_def_vel = atan2((lead(defenderY.x) - defenderY.x) / 0.1, (lead(defenderX.x) - defenderX.x) / 0.1),
+    angle_def_to_rec = atan2(y.x - defenderY.x, x.x - defenderX.x),
+    angle_diff = atan2(sin(angle_def_vel - angle_def_to_rec), cos(angle_def_vel - angle_def_to_rec))
+  ) 
+```
+
+```{r}
+ROC5 <- ROCjoined %>%
+  arrange(game_id, play_id, frame_id.x) %>%
+  group_by(game_id, play_id) %>%
+  filter(n() >= 5) %>%
+  slice_tail(n = 5) %>%
+  ungroup()
+ 
+str(ROCjoined$game_id)
+str(ROCjoined$play_id)
+
+
+
+ROC5 <- ROC5 %>%
+  left_join(dirDiffs, by = c("game_id", "play_id"))
+
+unique_plays <- ROC5 %>% 
+  distinct(game_id, play_id) %>%
+  ungroup()
+```
+
+```{r}
+set.seed(2015)
+
+train_plays <- unique_plays %>% 
+  sample_frac(0.8)  
+
+test_plays <- anti_join(unique_plays, train_plays,
+                        by = c("game_id", "play_id"))
+
+train_df <- ROC5 %>% 
+  inner_join(train_plays, by = c("game_id", "play_id"))
+
+test_df <- ROC5 %>% 
+  inner_join(test_plays, by = c("game_id", "play_id"))
+
+features <- c("close_rec_inst", "close_ball_inst", "final_distance", "distanceReceiver", "lastdirDiff")
+
+train_df <- train_df %>%
+  filter(!is.na(close_rec_inst), !is.na(close_ball_inst))
+
+test_df <- test_df %>%
+  filter(!is.na(close_rec_inst), !is.na(close_ball_inst))
+
+
+train_matrix <- model.matrix(~ . - 1, data = train_df[, features])
+test_matrix  <- model.matrix(~ . - 1, data = test_df[, features])
+
+dtrain <- xgb.DMatrix(train_matrix, label = train_df$target)
+dtest  <- xgb.DMatrix(test_matrix,  label = test_df$target)
+
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 4,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 300,
+  watchlist = list(train = dtrain, test = dtest),
+  print_every_n = 50,
+  early_stopping_rounds = 20
+)
+
+test_df$pred_prob <- predict(model, dtest)
+
+check <- test_df %>%
+  filter(game_id == 2023102201, play_id == 485)
+```
+
+
+```{r}
+library(pROC)
+true_y <- test_df$target
+roc_obj <- roc(true_y, test_df$pred_prob)
+auc(roc_obj)
+plot(roc_obj)
+
+
+brier <- mean((test_df$pred_prob - true_y)^2)
+brier
+```
+
+```{r}
+xgb.importance(feature_names = colnames(train_matrix), model = model) %>%
+  xgb.plot.importance(top_n = 10)
+```
+
+```{r}
+play_swings <- test_df %>%
+  group_by(game_id, play_id) %>%
+  arrange(frame_id.x, .by_group = TRUE) %>%
+  summarise(
+    start_prob = first(pred_prob),
+    end_prob   = last(pred_prob),
+    delta_prob = end_prob - start_prob,
+    abs_delta  = abs(end_prob - start_prob),
+    target = target
+  )
+```
+
+```{r}
+#Visualizations - why does YAC matter? what can DB's do to prevent YAC, when does YAC occur, show DB's and their EPA per coverage target in the dataframe compared to their YAC allowed
+#GIF - show how probability of YAC changes based on DB movements and path. show an alternative path and what it woudlve been in that case
+
+last_frame_test <- test_df %>%
+  group_by(game_id, play_id) %>%
+  arrange(frame_id.x, .by_group = TRUE) %>%
+  slice_tail(n = 1) %>%   # keep only the last frame
+  ungroup()
+brier_score <- mean((last_frame_test$pred_prob - last_frame_test$target)^2)
+brier_score
+
+
+last_frame_test <- last_frame_test %>%
+  left_join(multi_defender_plays, by = c("game_id", "play_id"))
+
+yacmodel <- lm(yac ~ pred_prob + pass_length + dropback_distance + final_distance + down + yards_to_go + 
+                 team_coverage_man_zone, data = last_frame_test)
+summary(yacmodel)
+```
+
+```{r}
+library(ggthemes)
+library(ggtext)
+library(extrafont)
+
+# View first 501 fonts
+
+one_play_in = data %>% 
+  filter(game_id == 2023102201, play_id == 485) %>% 
+  select(colnames(outputs))
+frames = max(one_play_in$f)
+one_play_out = outputs %>% 
+  filter(game_id == 2023102201, play_id == 485) %>% 
+  mutate(frame_id = frame_id+frames)
+one_play = rbind(one_play_in,one_play_out) %>% 
+  mutate(x = x, y = y)
+
+sup = supdata %>% 
+  filter(game_id == 2023102201, play_id == 485)
+
+ball = data %>% 
+  filter(game_id == 2023102201, play_id == 485) %>% 
+  select(ball_land_x, ball_land_y) %>% 
+  distinct()
+
+players_out = one_play_out %>% 
+  select(nfl_id) %>% 
+  distinct()
+
+players_in = one_play %>% 
+  filter(!nfl_id %in% players_out) %>% 
+  select(nfl_id) %>% 
+  distinct()
+
+one_p_players = one_play %>% 
+  semi_join(players_out, by = "nfl_id")
+
+library(gganimate)
+library(sportyR)
+library(ggtext)
+
+
+
+filled_in = one_play %>% 
+  mutate(alpha = 1) %>% 
+  group_by(nfl_id) %>%
+  complete(frame_id = full_seq(1:41, 1)) %>%     # ensure every id has frame_id 1–41
+  mutate(
+    alpha = if_else(is.na(alpha), 0, alpha)  # missing (new) rows become 0.5
+  ) %>%
+  filter(nfl_id == 55998 | nfl_id == 47862 ) %>%
+  fill(everything(), .direction = "down") %>%     # fill missing rows using last known data
+  ungroup()
+
+play_data <- ROCjoined %>%
+  filter(game_id == 2023102201, play_id == 485) %>%
+  left_join(dirDiffs, by = c("game_id", "play_id"))
+
+play_data <- play_data %>% arrange(frame_id.x)
+
+play_data <- play_data %>%
+  arrange(frame_id.x) %>%
+  mutate(
+    dx = c(0, diff(defenderX.x)),
+    dy = c(0, diff(defenderY.x)),
+    distance = sqrt(dx^2 + dy^2)
+  )
+
+avg_speed <- mean(play_data$distance[-1], na.rm = TRUE) # skip first row (0)
+
+
+vec_x <- play_data$ball_land_x - play_data$defenderX.x[1]
+vec_y <- play_data$ball_land_y - play_data$defenderY.x[1]
+total_dist <- sqrt(vec_x^2 + vec_y^2)
+
+# Number of frames needed to match actual speed
+n_frames_needed <- ceiling(total_dist / avg_speed)
+
+# Recreate straight-line path with realistic speed
+straight_line_scaled <- data.frame(
+  frame_id = seq(min(play_data$frame_id.x), length.out = n_frames_needed),
+  defenderX_alt = play_data$defenderX.x[1] + seq(0, 1, length.out = n_frames_needed) * vec_x,
+  defenderY_alt = play_data$defenderY.x[1] + seq(0, 1, length.out = n_frames_needed) * vec_y
+) 
+
+straight_line_scaled <- straight_line_scaled %>%
+  filter(frame_id <= 10)
+
+AltCheck <- play_data %>%
+  left_join(straight_line_scaled, by = c( "frame_id.x" = "frame_id"))
+
+AltCheck <- AltCheck %>%
+  group_by(game_id, play_id) %>%
+  mutate(
+    distanceReceiverAlt = sqrt((defenderX_alt - x.x)^2 + (defenderY_alt - y.x)^2),
+    final_distanceAlt = sqrt((defenderX_alt[10] - x.x[10])^2 + (defenderY_alt[10] - y.x[10])^2),
+    distanceBallAlt = sqrt((defenderX_alt - ball_land_x)^2 + (defenderY_alt - ball_land_y)^2)
+  )
+#instantaneous velocity towards receiver vs towards ball at each frame calculated in ROC's
+#feel free to double check this calculation
+AltCheck <- AltCheck %>%
+  group_by(game_id, play_id, defenderId.x) %>%
+  mutate(
+    close_rec_instAlt = (distanceReceiverAlt - lead(distanceReceiverAlt)) / 0.1,
+    close_ball_instAlt = (distanceBallAlt - lead(distanceBallAlt)) / 0.1,
+    
+    close_rec_instAlt = ifelse(is.infinite(close_rec_inst) | is.nan(close_rec_inst), NA, close_rec_inst),
+    close_ball_instAlt = ifelse(is.infinite(close_ball_inst) | is.nan(close_ball_inst), NA, close_ball_inst)
+  ) %>%
+  ungroup()
+
+OutputCheck <- AltCheck %>%
+  filter(frame_id.x >= 6, frame_id.x <= 9)
+
+dmat_actual <- xgb.DMatrix(
+  data = as.matrix(OutputCheck %>% select(close_rec_inst = close_rec_instAlt, close_ball_inst = close_ball_instAlt, final_distance = final_distanceAlt, distanceReceiver = distanceReceiverAlt, lastdirDiff))
+)
+features <- c("close_rec_inst", "close_ball_inst", "final_distance", "distanceReceiver", "lastdirDiff")
+
+
+pred_alt <- predict(model, dmat_actual)
+
+names(AltCheck %>% select(close_rec_inst, close_ball_inst, lastdirDiff, final_distance, distanceReceiver))
+
+print(pred_alt)
+
+OutputCheck <- cbind(OutputCheck, pred_alt)
+GraphCheck <- cbind(OutputCheck, check$pred_prob)
+
+library(ggplot2)
+
+prob_plot <- GraphCheck %>%
+  select(frame_id.x, pred_prob = `check$pred_prob`, pred_alt) %>%
+  tidyr::pivot_longer(
+    cols = c(pred_prob, pred_alt),
+    names_to = "path",
+    values_to = "prob"
+  ) %>%
+  mutate(
+    path = factor(path,
+                  levels = c("pred_prob", "pred_alt"),
+                  labels = c("Actual Path", "Alternative Path"))
+  )
+
+ggplot(prob_plot, aes(x = frame_id.x, y = prob, color = path)) +
+  geom_line(size = 1.15) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Actual Path" = "#d62728" ,
+                                "Alternative Path" = "#1f77b4")) +
+  labs(
+    title = "Probability of YAC >= 4 After Throw",
+    subtitle = "Actual (Red) vs DB Goes To Ball (Blue)",
+    x = "Frame",
+    y = "Predicted Probability (YAC ≥ 4)",
+    color = "Path"
+  ) +
+  theme_fivethirtyeight(base_size = 13)
+
+p <- ggplot() +
+annotate("text", 
+         x = seq(40, 70, 10),
+         y = 10,
+         label = 10 * c(3,4,5,4),
+         color = "#bebebe",
+         family = "Chivo",
+         size = 4) +
+  annotate("text", 
+           x = seq(40, 70, 10),
+           y = 40,
+           label = 10 * c(3,4,5,4),
+           color = "#bebebe",
+           family = "Chivo",
+           angle = 180,
+           size = 4) +
+  
+  annotate("text",
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 0,
+           label = "—",
+           angle = 90,
+           color = "#bebebe") +
+  
+  annotate("text",
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 160/3,
+           label = "—",
+           angle = 90,
+           color = "#bebebe") +
+geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
+geom_point(data = filled_in,
+           aes(x, y, color = player_side),
+           size = 6,
+           alpha = 0.95) +
+    geom_point(data = filled_in %>% filter(nfl_id == 55998),
+             aes(x, y),
+             size = 7.5,
+             color = "#FFD700",      # bright gold for visibility
+             alpha = 1) +
+geom_path(data = AltCheck %>% filter(defenderId.x == 47862),
+          aes(defenderX.x, defenderY.x),
+          color = "red",
+          size = 1.2) +
+geom_path(data = AltCheck,
+            aes(defenderX_alt, defenderY_alt),
+            color = "blue",
+            linetype = "dashed",
+            size = 1.1) +
+geom_point(data = ball,
+           aes(ball_land_x, ball_land_y),
+           shape = "x",
+           size = 4,
+           color = "brown") +
+labs(
+  title = "<span style='color:#A5ACAF;'>**Las Vegas Raiders**</span> vs. 
+             <span style='color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
+  subtitle = sup$play_description
+) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.position = "none",
+    plot.subtitle = element_text(size = 10, face = "italic", hjust = 0.5),
+    plot.title = ggtext::element_markdown(hjust = 0.5, size = 14),
+    text = element_text(family = "", color = "#26282A"),
+    axis.text = element_blank(),
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_color_manual(values = c(
+    Defense = "#C83803",
+    Offense = "#A5ACAF"
+  )) +
+transition_time(frame_id) +
+  ease_aes("linear") +
+  coord_cartesian(
+    xlim = c(35, 75),
+    ylim = c(0, 160/3),
+    expand = FALSE,
+    clip = "off"
+  )
+anim <- animate(
+  p,
+  fps = 10,
+  width = 900,
+  height = 400,
+  duration = max(filled_in$frame_id) / 10  # ensures 1 frame per actual frame_id
+)
+
+anim_save("Play.gif", animation = anim)
+anim
+```
+
