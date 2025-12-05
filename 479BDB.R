@@ -1,6 +1,7 @@
 library(arrow)
 library(ggplot2)
 library(dplyr)
+library(xgboost)
 
 
 targetdata <- read_parquet("sumer_coverages_player_play.parquet")
@@ -93,28 +94,40 @@ targs <- data %>%
 
 receivers479 <- targs %>%
   filter(player_role == "Targeted Receiver") %>%
-  select(game_id, play_id, frame_id, nfl_id, player_name, x, y, player_position, ball_land_x, ball_land_y)
+  select(game_id, play_id, frame_id, nfl_id, player_name, x, y, player_position, recDir = dir, ball_land_x, ball_land_y)
 
 # Get defenders at the same frame
 defenders479 <- targs %>%
   filter(targeted_defender == TRUE) %>%
-  select(game_id, play_id, frame_id, player_name, defenderId = nfl_id, defenderY = y, defenderX = x, player_position)
+  select(game_id, play_id, frame_id, player_name, defenderId = nfl_id, defenderY = y, defenderX = x, player_position, dbDir = dir)
 
 joined479 <- inner_join(receivers479, defenders479, by = c("game_id", "play_id", "frame_id"))
+
+angle_diff <- function(a, b) {
+  diff <- abs(a - b) %% 360
+  ifelse(diff > 180, 360 - diff, diff)
+}
 
 
 joined479 <- joined479 %>%
   # compute inputDistance per frame
-  mutate(inputDistance = sqrt((x - defenderX)^2 + (y - defenderY)^2)) %>%
+  mutate(inputDistance = sqrt((x - defenderX)^2 + (y - defenderY)^2),
+         dirDiff = angle_diff(recDir, dbDir)
+  ) %>%
   group_by(game_id, play_id) %>%
   arrange(frame_id, .by_group = TRUE) %>%
   # compute valid flag based on the last frame distance of the play
   mutate(
     lastDistance = last(inputDistance),
+    lastdirDiff = last(dirDiff),
     valid = ifelse(lastDistance >= 2,1, 0)
   ) %>%
   ungroup() %>%
   filter(valid == 1)
+
+dirDiffs <- joined479 %>%
+  distinct(game_id, play_id, .keep_all = TRUE) %>%
+  select(game_id, play_id, lastdirDiff)
   
 outputs479 <- outputsDef %>%
   semi_join(joined479, by = c("game_id", "play_id"))
@@ -136,6 +149,16 @@ joinedoutputs479 <- joinedoutputs479 %>%
 
 joinedoutputs479 <- joinedoutputs479 %>%
   filter(targeted_defender == "TRUE")
+
+multi_defender_plays <- joinedoutputs479 %>%
+  group_by(game_id, play_id, nfl_id) %>%        # group by play + receiver
+  summarise(num_defenders = n_distinct(defenderId), .groups = "drop") %>%
+  filter(num_defenders > 1)
+
+joinedoutputs479 <- joinedoutputs479 %>%
+  anti_join(multi_defender_plays,
+            by = c("game_id", "play_id", "nfl_id"))
+
 
 
 final_frame_df <- joinedoutputs479 %>%
@@ -269,17 +292,17 @@ ROCjoined <- ROCs %>%
 ROC5 <- ROCjoined %>%
   arrange(game_id, play_id, frame_id.x) %>%
   group_by(game_id, play_id) %>%
-  slice_tail(n = 5) %>%     
+  filter(n() >= 5) %>%
+  slice_tail(n = 5) %>%
   ungroup()
  
 str(ROCjoined$game_id)
 str(ROCjoined$play_id)
 
+
+
 ROC5 <- ROC5 %>%
-  mutate(
-    game_id = as.character(game_id),
-    play_id = as.character(play_id)
-  )
+  left_join(dirDiffs, by = c("game_id", "play_id"))
 
 unique_plays <- ROC5 %>% 
   distinct(game_id, play_id) %>%
@@ -299,7 +322,7 @@ train_df <- ROC5 %>%
 test_df <- ROC5 %>% 
   inner_join(test_plays, by = c("game_id", "play_id"))
 
-features <- c("close_rec_inst", "angle_def_to_rec", "final_distance", "distanceReceiver")
+features <- c("close_rec_inst", "close_ball_inst", "final_distance", "distanceReceiver", "lastdirDiff")
 
 train_df <- train_df %>%
   filter(!is.na(close_rec_inst), !is.na(close_ball_inst))
@@ -335,10 +358,9 @@ model <- xgb.train(
 test_df$pred_prob <- predict(model, dtest)
 
 check <- test_df %>%
-  filter(game_id == 2023090700, play_id == 194)
+  filter(game_id == 2023102201, play_id == 485)
 
-check <- check %>%
-  select(target, pred_prob)
+
 
 true_y <- test_df$target 
 
@@ -363,9 +385,26 @@ play_swings <- test_df %>%
     start_prob = first(pred_prob),
     end_prob   = last(pred_prob),
     delta_prob = end_prob - start_prob,
-    abs_delta  = abs(end_prob - start_prob)
+    abs_delta  = abs(end_prob - start_prob),
+    target = target
   )
 
 
 #Visualizations - why does YAC matter? what can DB's do to prevent YAC, when does YAC occur, show DB's and their EPA per coverage target in the dataframe compared to their YAC allowed
 #GIF - show how probability of YAC changes based on DB movements and path. show an alternative path and what it woudlve been in that case
+last_frame_test <- test_df %>%
+  group_by(game_id, play_id) %>%
+  arrange(frame_id.x, .by_group = TRUE) %>%
+  slice_tail(n = 1) %>%   # keep only the last frame
+  ungroup()
+brier_score <- mean((last_frame_test$pred_prob - last_frame_test$target)^2)
+brier_score
+
+colnames(last_frame_test)
+
+last_frame_test <- last_frame_test %>%
+  left_join(multi_defender_plays, by = c("game_id", "play_id"))
+
+yacmodel <- lm(yac ~ pred_prob + pass_length + dropback_distance + final_distance + down + yards_to_go + 
+                 team_coverage_man_zone + , data = last_frame_test)
+summary(yacmodel)
