@@ -5,7 +5,7 @@ date: "2025-12-05"
 output: html_document
 ---
 
-# Executive Summary
+## Executive Summary
 
 In the NFL today, most interest is directed towards the offense, even when it comes to advanced analytics. Naturally, we were inspired to complete a study that can benefit the defense while also speaking volumes to what the offense is doing. This study allowed us to better understand how defensive positioning and movement affect yards after catch (YAC) on completed pass plays in the NFL. YAC is a critical component of offensive success, often determining whether a short completion becomes a routine gain or an explosive play. By analyzing player tracking data from the 2023 NFL season, we quantified how close defenders are to receivers at the moment of the catch, understood the likely objective of the defender based on their movement direction and speed, and how these factors influence the likelihood and magnitude of YAC.
 
@@ -15,9 +15,17 @@ To model the probability of generating meaningful YAC, we trained an XGBoost cla
 
 Overall, this project demonstrates that defender positioning and reactive movement play a measurable and meaningful role in limiting YAC. These findings provide actionable insight for defensive coaching, particularly in emphasizing pursuit angles, closing speed, and leverage at the point of catch to reduce explosive plays.
 
+## Technical Report
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
+
+This report analyzes how defender positioning and movement affect yards after catch (YAC) on completed pass plays using tracking and play-level data from the 2023 NFL season. The goal is to quantify how close defenders are to receivers at the catch point, how quickly they are closing, and how these factors drive the probability that the offense gains meaningful YAC (defined as at least four yards after the catch).
+
+We began our data engineering process by ingesting input and output frame-level tracking data for each week of the 2023 season as well as supplementary play-level data that provided various context of the situation such as down, distance, yards gained, pass result, pass length, etc, all provided by Kaggle for the 2026 Big Data Bowl competition. We also utilized coverage labels from Sumer Sports to identify roles like the targeted receiver and targeted defender. 
+
+
 
 ```{r, echo = FALSE, message = FALSE, warning = FALSE}
 library(arrow)
@@ -79,6 +87,9 @@ playerinfo <- data %>%
   select(game_id, play_id, nfl_id, player_name, player_position, player_to_predict, player_side)
 ```
 
+To interpret tracking positions, we attached player-level metadata (names, positions, and offensive/defensive side) to each tracking row. We then joined this metadata into the outputs data, and identified frames that contain only offensive players (where the sum of defense indicators is zero). These purely offensive frames are not relevant for defender–receiver interaction modeling, so we remove them. The resulting `outputsDef` data frame contains only frames where at least one defensive player is present.
+
+
 ```{r}
 outputs <- outputs %>%
   left_join(playerinfo, by = c("game_id", "play_id", "nfl_id"))
@@ -99,6 +110,14 @@ outputplays <- outputs %>%
 outputsDef <- outputs %>%
   anti_join(outputsinfo, by = c("game_id", "play_id", "frame_id"))
 ```
+
+The variable targets variable is constructed by joining the Sumer coverage labels to the tracking input data, which will then allow us to isolate the targeted receiver and their labeled targeted defender for each play.
+
+After ensuring that at each frame of a play we have both the receiver and their coverage defender’s positions, 
+we then compute frame-level spatial features: the distance between the receiver and defender at each frame, and the absolute angular difference between the receiver movement direction and the defender direction.
+
+For each play, we track the last fram’s distance and direction difference, and we retain plays where the final defender–receiver distance is at least two yards, focusing on situations where the defender had meaningful space to close.
+
 
 ```{r}
 week1targs <- week1 %>%
@@ -177,6 +196,9 @@ joinedoutputs479 <- joinedoutputs479 %>%
             by = c("game_id", "play_id", "nfl_id"))
 ```
 
+
+To relate defender proximity to offensive production, we took the last tracking frame for the targeted receiver–defender pair. We then joined in play-level information from and construct the response variables: YAC (defined here as yards_gained - pass_length for completed passes) and the distance between the defender and the receiver in the last frame. We focused only on completed passes, plays without called penalties, plays without fumbles, and passes with air yards no more than 20 and final distances less than 40 yards. As a baseline, we fit a simple linear regression of yac on final_distance and visualize the relationship. This provides a baseline measure of how separation at the catch correlates with YAC before introducing more complex movement features.
+
 ```{r}
 final_frame_df <- joinedoutputs479 %>%
   group_by(game_id, play_id) %>%
@@ -185,8 +207,6 @@ final_frame_df <- joinedoutputs479 %>%
 
 distances <- final_frame_df %>%
   left_join(supdata, by = c("game_id", "play_id"))
-
-colnames(supdata)
 
 distances <- distances %>%
   filter(!grepl("fumble", play_description, ignore.case = TRUE)) %>%
@@ -220,6 +240,8 @@ ggplot(distances, aes(final_distance, yac)) +
     y = "Yards After Catch"
   )
 ```
+
+Before building our more complex model, we briefly compared the targeted defender labels to a simple heuristic definition based on tracking data. This is essentially to assesses whether proximity-based heuristics align with expert coverage labels and demonstrates that the labels from Sumer Sports capture more than just who is closest to the ball. The output shows us that this is a fair assumption to make. 
 
 ```{r}
 outputs_updated_frames = outputs %>% mutate(frame_id = frame_id+100)
@@ -278,6 +300,9 @@ targeted_distance_vs_sumer = target_defender %>%
 summarise(targeted_distance_vs_sumer, sumer = mean(sumer), dist = mean(dist))
 ```
 
+Static distance at the catch only captures part of the story. To incorporate defender movement, we computed the distance from the defender to the receiver and the distance from the defender to the ball landing point for each frame. We derived two different closing rates, one for moving towards the receiver and one for moving towards the ball. If the closing rate is positive, that means that the defender is moving closer. We defined a binary target variable (1 if YAC was 4 yards or more, 0 if not) and retrieved the direction of the defender's velocity vector, the angle from the defender to the receiver, and the difference between the defender's motion direction and the line to the receiver. We selected only plays with at least five frames, focusing on defender behavior immediately prior to and around the catch.
+
+
 ```{r}
 #distance to receiver
 
@@ -335,6 +360,17 @@ unique_plays <- ROC5 %>%
   ungroup()
 ```
 
+We were then able to develop our XGBoost model for the probability that a target produces at least four yards after catch. We used the following frame-level features as predictors:
+
+- `close_rec_inst`: closing rate toward the receiver.
+- `close_ball_inst`: closing rate toward the ball.
+- `final_distance`: final defender–receiver separation.
+- `distanceReceiver`: distance to the receiver in the late frames.
+- `lastdirDiff`: final direction difference between receiver and defender.
+
+After filtering out rows with missing closing rates, we transformed these predictors into model matrices and fit a gradient boosted tree model (XGBoost) with a logistic loss. The model is trained for up to 300 rounds with early stopping based on validation log-loss.
+
+
 ```{r}
 set.seed(2015)
 
@@ -389,6 +425,8 @@ check <- test_df %>%
   filter(game_id == 2023102201, play_id == 485)
 ```
 
+On the test set, we computed the predicted probability pred_prob that each frame produces high YAC. We evaluate the classifier using ROC curve and AUC to assess how well the model discriminates between high-YAC and low-YAC plays, and Brier score to capture overall calibration. XGBoost’s built-in feature importance summarizes which predictors contribute most to the model’s decisions. The resulting importance plot highlights whether dynamic motion (closing speed), static separation, or directional alignment plays the largest role in predicting high YAC.
+
 
 ```{r}
 library(pROC)
@@ -441,256 +479,14 @@ yacmodel <- lm(yac ~ pred_prob + pass_length + dropback_distance + final_distanc
 summary(yacmodel)
 ```
 
-```{r}
-library(ggthemes)
-library(ggtext)
-library(extrafont)
 
-# View first 501 fonts
+## Limitations and Future Work
 
-one_play_in = data %>% 
-  filter(game_id == 2023102201, play_id == 485) %>% 
-  select(colnames(outputs))
-frames = max(one_play_in$f)
-one_play_out = outputs %>% 
-  filter(game_id == 2023102201, play_id == 485) %>% 
-  mutate(frame_id = frame_id+frames)
-one_play = rbind(one_play_in,one_play_out) %>% 
-  mutate(x = x, y = y)
+This analysis has several important limitations. First, our identification of targeted defenders relies on the Sumer Sports coverage labels and a simple filtering of plays with a single targeted defender; more complex coverage schemes (e.g., pattern-match zone, bracket coverage) may not be fully captured. We did double-check with tracking coordinates to ensure similarity, however, as mentioned in the report. Second, we focus on passes with air yards of 20 or fewer and final defender distances below 40 yards, which simplifies the problem but excludes deep shots and broken plays that can generate very large YAC. It must also be considered that YAC on these plays that were left out isn't as significant. 
 
-sup = supdata %>% 
-  filter(game_id == 2023102201, play_id == 485)
+Our dynamic features use frame-to-frame differences over 0.1-second intervals and only the last five frames of each play. This emphasizes late-play behavior but may miss early leverage and route-stem positioning that set up the eventual separation. In addition, we treat frames within a play as independent observations in the classifier, even though they are confounding.
 
-ball = data %>% 
-  filter(game_id == 2023102201, play_id == 485) %>% 
-  select(ball_land_x, ball_land_y) %>% 
-  distinct()
+In the future, we could incorporate full-route trajectories and earlier frames to quantify how defenders manage cushion and leverage throughout the route. Another possible route would expanding the feature set to include team tendencies, personnel groupings, and pre-snap alignments.
 
-players_out = one_play_out %>% 
-  select(nfl_id) %>% 
-  distinct()
-
-players_in = one_play %>% 
-  filter(!nfl_id %in% players_out) %>% 
-  select(nfl_id) %>% 
-  distinct()
-
-one_p_players = one_play %>% 
-  semi_join(players_out, by = "nfl_id")
-
-library(gganimate)
-library(sportyR)
-library(ggtext)
-
-
-
-filled_in = one_play %>% 
-  mutate(alpha = 1) %>% 
-  group_by(nfl_id) %>%
-  complete(frame_id = full_seq(1:41, 1)) %>%     # ensure every id has frame_id 1–41
-  mutate(
-    alpha = if_else(is.na(alpha), 0, alpha)  # missing (new) rows become 0.5
-  ) %>%
-  filter(nfl_id == 55998 | nfl_id == 47862 ) %>%
-  fill(everything(), .direction = "down") %>%     # fill missing rows using last known data
-  ungroup()
-
-play_data <- ROCjoined %>%
-  filter(game_id == 2023102201, play_id == 485) %>%
-  left_join(dirDiffs, by = c("game_id", "play_id"))
-
-play_data <- play_data %>% arrange(frame_id.x)
-
-play_data <- play_data %>%
-  arrange(frame_id.x) %>%
-  mutate(
-    dx = c(0, diff(defenderX.x)),
-    dy = c(0, diff(defenderY.x)),
-    distance = sqrt(dx^2 + dy^2)
-  )
-
-avg_speed <- mean(play_data$distance[-1], na.rm = TRUE) # skip first row (0)
-
-
-vec_x <- play_data$ball_land_x - play_data$defenderX.x[1]
-vec_y <- play_data$ball_land_y - play_data$defenderY.x[1]
-total_dist <- sqrt(vec_x^2 + vec_y^2)
-
-# Number of frames needed to match actual speed
-n_frames_needed <- ceiling(total_dist / avg_speed)
-
-# Recreate straight-line path with realistic speed
-straight_line_scaled <- data.frame(
-  frame_id = seq(min(play_data$frame_id.x), length.out = n_frames_needed),
-  defenderX_alt = play_data$defenderX.x[1] + seq(0, 1, length.out = n_frames_needed) * vec_x,
-  defenderY_alt = play_data$defenderY.x[1] + seq(0, 1, length.out = n_frames_needed) * vec_y
-) 
-
-straight_line_scaled <- straight_line_scaled %>%
-  filter(frame_id <= 10)
-
-AltCheck <- play_data %>%
-  left_join(straight_line_scaled, by = c( "frame_id.x" = "frame_id"))
-
-AltCheck <- AltCheck %>%
-  group_by(game_id, play_id) %>%
-  mutate(
-    distanceReceiverAlt = sqrt((defenderX_alt - x.x)^2 + (defenderY_alt - y.x)^2),
-    final_distanceAlt = sqrt((defenderX_alt[10] - x.x[10])^2 + (defenderY_alt[10] - y.x[10])^2),
-    distanceBallAlt = sqrt((defenderX_alt - ball_land_x)^2 + (defenderY_alt - ball_land_y)^2)
-  )
-#instantaneous velocity towards receiver vs towards ball at each frame calculated in ROC's
-#feel free to double check this calculation
-AltCheck <- AltCheck %>%
-  group_by(game_id, play_id, defenderId.x) %>%
-  mutate(
-    close_rec_instAlt = (distanceReceiverAlt - lead(distanceReceiverAlt)) / 0.1,
-    close_ball_instAlt = (distanceBallAlt - lead(distanceBallAlt)) / 0.1,
-    
-    close_rec_instAlt = ifelse(is.infinite(close_rec_inst) | is.nan(close_rec_inst), NA, close_rec_inst),
-    close_ball_instAlt = ifelse(is.infinite(close_ball_inst) | is.nan(close_ball_inst), NA, close_ball_inst)
-  ) %>%
-  ungroup()
-
-OutputCheck <- AltCheck %>%
-  filter(frame_id.x >= 6, frame_id.x <= 9)
-
-dmat_actual <- xgb.DMatrix(
-  data = as.matrix(OutputCheck %>% select(close_rec_inst = close_rec_instAlt, close_ball_inst = close_ball_instAlt, final_distance = final_distanceAlt, distanceReceiver = distanceReceiverAlt, lastdirDiff))
-)
-features <- c("close_rec_inst", "close_ball_inst", "final_distance", "distanceReceiver", "lastdirDiff")
-
-
-pred_alt <- predict(model, dmat_actual)
-
-names(AltCheck %>% select(close_rec_inst, close_ball_inst, lastdirDiff, final_distance, distanceReceiver))
-
-print(pred_alt)
-
-OutputCheck <- cbind(OutputCheck, pred_alt)
-GraphCheck <- cbind(OutputCheck, check$pred_prob)
-
-library(ggplot2)
-
-prob_plot <- GraphCheck %>%
-  select(frame_id.x, pred_prob = `check$pred_prob`, pred_alt) %>%
-  tidyr::pivot_longer(
-    cols = c(pred_prob, pred_alt),
-    names_to = "path",
-    values_to = "prob"
-  ) %>%
-  mutate(
-    path = factor(path,
-                  levels = c("pred_prob", "pred_alt"),
-                  labels = c("Actual Path", "Alternative Path"))
-  )
-
-ggplot(prob_plot, aes(x = frame_id.x, y = prob, color = path)) +
-  geom_line(size = 1.15) +
-  geom_point(size = 2) +
-  scale_color_manual(values = c("Actual Path" = "#d62728" ,
-                                "Alternative Path" = "#1f77b4")) +
-  labs(
-    title = "Probability of YAC >= 4 After Throw",
-    subtitle = "Actual (Red) vs DB Goes To Ball (Blue)",
-    x = "Frame",
-    y = "Predicted Probability (YAC ≥ 4)",
-    color = "Path"
-  ) +
-  theme_fivethirtyeight(base_size = 13)
-
-p <- ggplot() +
-annotate("text", 
-         x = seq(40, 70, 10),
-         y = 10,
-         label = 10 * c(3,4,5,4),
-         color = "#bebebe",
-         family = "Chivo",
-         size = 4) +
-  annotate("text", 
-           x = seq(40, 70, 10),
-           y = 40,
-           label = 10 * c(3,4,5,4),
-           color = "#bebebe",
-           family = "Chivo",
-           angle = 180,
-           size = 4) +
-  
-  annotate("text",
-           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
-           y = 0,
-           label = "—",
-           angle = 90,
-           color = "#bebebe") +
-  
-  annotate("text",
-           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
-           y = 160/3,
-           label = "—",
-           angle = 90,
-           color = "#bebebe") +
-geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
-geom_point(data = filled_in,
-           aes(x, y, color = player_side),
-           size = 6,
-           alpha = 0.95) +
-    geom_point(data = filled_in %>% filter(nfl_id == 55998),
-             aes(x, y),
-             size = 7.5,
-             color = "#FFD700",      # bright gold for visibility
-             alpha = 1) +
-geom_path(data = AltCheck %>% filter(defenderId.x == 47862),
-          aes(defenderX.x, defenderY.x),
-          color = "red",
-          size = 1.2) +
-geom_path(data = AltCheck,
-            aes(defenderX_alt, defenderY_alt),
-            color = "blue",
-            linetype = "dashed",
-            size = 1.1) +
-geom_point(data = ball,
-           aes(ball_land_x, ball_land_y),
-           shape = "x",
-           size = 4,
-           color = "brown") +
-labs(
-  title = "<span style='color:#A5ACAF;'>**Las Vegas Raiders**</span> vs. 
-             <span style='color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
-  subtitle = sup$play_description
-) +
-  theme_minimal() +
-  theme(
-    panel.background = element_rect(fill = "white", color = NA),
-    legend.position = "none",
-    plot.subtitle = element_text(size = 10, face = "italic", hjust = 0.5),
-    plot.title = ggtext::element_markdown(hjust = 0.5, size = 14),
-    text = element_text(family = "", color = "#26282A"),
-    axis.text = element_blank(),
-    panel.grid = element_blank(),
-    axis.title = element_blank(),
-    axis.ticks = element_blank()
-  ) +
-  scale_color_manual(values = c(
-    Defense = "#C83803",
-    Offense = "#A5ACAF"
-  )) +
-transition_time(frame_id) +
-  ease_aes("linear") +
-  coord_cartesian(
-    xlim = c(35, 75),
-    ylim = c(0, 160/3),
-    expand = FALSE,
-    clip = "off"
-  )
-anim <- animate(
-  p,
-  fps = 10,
-  width = 900,
-  height = 400,
-  duration = max(filled_in$frame_id) / 10  # ensures 1 frame per actual frame_id
-)
-
-anim_save("Play.gif", animation = anim)
-anim
-```
+Despite these limitations, the current analysis demonstrates that defender closing speed, separation, and directional alignment are systematically related to YAC and provides a reproducible framework for evaluating coverage performance using tracking data.
 
