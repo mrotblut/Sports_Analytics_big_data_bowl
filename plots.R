@@ -295,11 +295,25 @@ p= ggplot()  +
            label = "–",
            angle = 90) +
   geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
+  geom_path(
+    data = db_path_perm,
+    aes(x, y, group = 1),
+    color = "grey",
+    size = 1.2,
+    alpha = 0.5
+  ) +
+  geom_path(
+    data = wr_path_perm,
+    aes(x, y, group = 1),
+    color = "grey",
+    size = 1.2,
+    alpha = 0.5
+  ) +
   geom_point(data = one_play, aes(x,y,color = player_side), size = 7.5)+
   geom_point(data = ball, aes(ball_land_x,ball_land_y),shape = "x", size = 6, color = 'brown')+
-  theme_minimal() +
   labs(title = "<span style = 'color:#A5ACAF;'>**Las Vegas Raiders**</span> vs. <span style = 'color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
        subtitle = sup$play_description) +
+  theme_minimal() +
   theme(panel.background = element_rect(fill = "white"),
         legend.position = "none",
         plot.subtitle = element_text(size = 9, face = "italic", hjust = 0.5),
@@ -309,18 +323,18 @@ p= ggplot()  +
         panel.grid = element_blank(),
         axis.title = element_blank(),
         axis.ticks = element_blank())+
-  scale_color_manual(values = c(Defense = "#C83803", Offense = "#A5ACAF"))+
+  scale_color_manual(values = c(Defense = "#0F0708", Offense = "#C83803"))+
   transition_time(frame_id)+
   annotate("segment", 
-         x = 15,
-         xend = 65,
-         y = c(-Inf, Inf),
-         yend = c(-Inf, Inf),
-        color = "#bebebe") +
-    scale_size_identity() +
-    scale_fill_identity() +
-    ease_aes("linear") +
-    coord_cartesian(xlim = c(35, 75), ylim = c(0, 160 / 3), expand = FALSE)
+           x = 15,
+           xend = 65,
+           y = c(-Inf, Inf),
+           yend = c(-Inf, Inf),
+           color = "#bebebe") +
+  scale_size_identity() +
+  scale_fill_identity() +
+  ease_aes("linear") +
+  coord_cartesian(xlim = c(35, 75), ylim = c(0, 160 / 3), expand = FALSE)
 
 anim <- animate(
   p,
@@ -331,5 +345,7 @@ anim <- animate(
 )
 
 anim_save("full_play.gif", animation = anim)
+anim
+
 
 
