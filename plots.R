@@ -53,6 +53,14 @@ filled_in = one_play %>%
   fill(everything(), .direction = "down") %>%     # fill missing rows using last known data
   ungroup()
 
+db_path_perm <- filled_in %>%
+  filter(nfl_id == 47862) %>%
+  select(x, y)
+
+wr_path_perm <- filled_in %>%
+  filter(nfl_id == 55998) %>%
+  select(x, y)
+
 play_data <- ROCjoined %>%
   filter(game_id == 2023102201, play_id == 485) %>%
   left_join(dirDiffs, by = c("game_id", "play_id"))
@@ -346,6 +354,7 @@ anim <- animate(
 
 anim_save("full_play.gif", animation = anim)
 anim
+
 
 
 
