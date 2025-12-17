@@ -3,8 +3,19 @@ library(xgboost)
 library(ggthemes)
 library(ggtext)
 library(extrafont)
+library(nflreadr)
 
 # View first 501 fonts
+
+missing_roster = tibble(
+  full_name = c("Tre'von Moehrig", "David Long", "DJ Moore"),
+  jersey_number = c(77, 59, 2)
+)
+
+roster = load_rosters(2023) %>% 
+  filter(team %in% c("LV","CHI")) %>% 
+  select(full_name,jersey_number) %>% 
+  rbind(missing_roster)
 
 one_play_in = data %>% 
   filter(game_id == 2023102201, play_id == 485) %>% 
@@ -14,8 +25,8 @@ one_play_out = outputs %>%
   filter(game_id == 2023102201, play_id == 485) %>% 
   mutate(frame_id = frame_id+frames)
 one_play = rbind(one_play_in,one_play_out) %>% 
-  mutate(x = x, y = y)
-
+  mutate(x = x, y = y) %>% 
+  left_join(roster, by = c("player_name" = "full_name"))
 sup = supdata %>% 
   filter(game_id == 2023102201, play_id == 485)
 
@@ -164,66 +175,86 @@ ggplot(prob_plot, aes(x = frame_id.x, y = prob, color = path)) +
     color = "Path"
   ) +
   theme_fivethirtyeight(base_size = 13)
+ggsave("Prob Plot.png")
 
 p <- ggplot() +
-annotate("text", 
-         x = seq(40, 70, 10),
-         y = 10,
-         label = 10 * c(3,4,5,4),
-         color = "#bebebe",
-         family = "Chivo",
-         size = 4) +
+  annotate("text", 
+           x = seq(40, 70, 10),
+           y = 10,
+           color = "#bebebe",
+           family = "Chivo",
+           label = 10 * c(3,4,5,4)) +
   annotate("text", 
            x = seq(40, 70, 10),
            y = 40,
-           label = 10 * c(3,4,5,4),
            color = "#bebebe",
            family = "Chivo",
-           angle = 180,
-           size = 4) +
-  
-  annotate("text",
+           label = 10 * c(3,4,5,4),
+           angle = 180) +
+  annotate("text", 
            x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
            y = 0,
+           color = "#bebebe",
            label = "—",
-           angle = 90,
-           color = "#bebebe") +
-  
-  annotate("text",
+           angle = 90) +
+  annotate("text", 
            x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
            y = 160/3,
+           color = "#bebebe",
            label = "—",
-           angle = 90,
-           color = "#bebebe") +
-geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
-geom_point(data = filled_in,
-           aes(x, y, color = player_side),
-           size = 6,
-           alpha = 0.95) +
-    geom_point(data = filled_in %>% filter(nfl_id == 55998),
-             aes(x, y),
-             size = 7.5,
-             color = "#FFD700",      # bright gold for visibility
-             alpha = 1) +
-geom_path(data = AltCheck %>% filter(defenderId.x == 47862),
-          aes(defenderX.x, defenderY.x),
-          color = "red",
-          size = 1.2) +
-geom_path(data = AltCheck,
+           angle = 90) +
+  annotate("text", 
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 23.36667,
+           color = "#bebebe",
+           label = "–",
+           angle = 90) +
+  annotate("text", 
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 29.96667,
+           color = "#bebebe",
+           label = "–",
+           angle = 90) +
+  geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
+  geom_hline(yintercept = 0, color = "#bebebe")+
+  geom_hline(yintercept = 160/3, color = "#bebebe")+
+  geom_point(data = filled_in,
+             aes(x, y, color = player_side),
+             size = 6,
+             alpha = 0.95) +
+  geom_path(
+    data = db_path_perm,
+    aes(x, y, group = 1),
+    color = "grey",
+    size = 1.2,
+    alpha = 0.5
+  ) +
+  geom_path(
+    data = wr_path_perm,
+    aes(x, y, group = 1),
+    color = "grey",
+    size = 1.2,
+    alpha = 0.5
+  ) +
+  geom_path(data = AltCheck %>% filter(defenderId.x == 47862),
+            aes(defenderX.x, defenderY.x),
+            color = "red",
+            size = 1.2) +
+  geom_path(data = AltCheck,
             aes(defenderX_alt, defenderY_alt),
             color = "blue",
             linetype = "dashed",
             size = 1.1) +
-geom_point(data = ball,
-           aes(ball_land_x, ball_land_y),
-           shape = "x",
-           size = 4,
-           color = "brown") +
-labs(
-  title = "<span style='color:#A5ACAF;'>**Las Vegas Raiders**</span> vs. 
+  geom_point(data = ball,
+             aes(ball_land_x, ball_land_y),
+             shape = "x",
+             size = 4,
+             color = "brown") +
+  labs(
+    title = "<span style='color:#0F0708;'>**Las Vegas Raiders**</span> vs. 
              <span style='color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
-  subtitle = sup$play_description
-) +
+    subtitle = sup$play_description
+  ) +
   theme_minimal() +
   theme(
     panel.background = element_rect(fill = "white", color = NA),
@@ -236,24 +267,16 @@ labs(
     axis.title = element_blank(),
     axis.ticks = element_blank()
   ) +
-  scale_color_manual(values = c(
-    Defense = "#C83803",
-    Offense = "#A5ACAF"
-  )) +
-transition_time(frame_id) +
+  scale_color_manual(values = c(Defense = "#0F0708", Offense = "#C83803"))+
+  transition_time(frame_id) +
   ease_aes("linear") +
-  coord_cartesian(
-    xlim = c(35, 75),
-    ylim = c(0, 160/3),
-    expand = FALSE,
-    clip = "off"
-  )
+  coord_cartesian(xlim = c(35, 75), ylim = c(0, 160 / 3), expand = FALSE)
 anim <- animate(
   p,
   fps = 10,
   width = 900,
   height = 400,
-  duration = max(filled_in$frame_id) / 10  # ensures 1 frame per actual frame_id
+  duration = max(one_play$frame_id) / 10  # ensures 1 frame per actual frame_id
 )
 
 anim_save("Play.gif", animation = anim)
@@ -303,6 +326,7 @@ p= ggplot()  +
            label = "–",
            angle = 90) +
   geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
+  geom_hline(yintercept = seq(0,53.3,53.3), color = "#bebebe")+
   geom_path(
     data = db_path_perm,
     aes(x, y, group = 1),
@@ -319,7 +343,7 @@ p= ggplot()  +
   ) +
   geom_point(data = one_play, aes(x,y,color = player_side), size = 7.5)+
   geom_point(data = ball, aes(ball_land_x,ball_land_y),shape = "x", size = 6, color = 'brown')+
-  labs(title = "<span style = 'color:#A5ACAF;'>**Las Vegas Raiders**</span> vs. <span style = 'color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
+  labs(title = "<span style = 'color:#0F0708;'>**Las Vegas Raiders**</span> vs. <span style = 'color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
        subtitle = sup$play_description) +
   theme_minimal() +
   theme(panel.background = element_rect(fill = "white"),
@@ -349,12 +373,103 @@ anim <- animate(
   fps = 10,
   width = 900,
   height = 400,
-  duration = max(filled_in$frame_id) / 10  # ensures 1 frame per actual frame_id
+  duration = max(one_play$frame_id) / 10  # ensures 1 frame per actual frame_id
 )
 
 anim_save("full_play.gif", animation = anim)
 anim
 
+one_frame = filled_in %>% filter(frame_id == max(one_play$frame_id))
 
-
-
+ggplot() +
+  annotate("text", 
+           x = seq(40, 70, 10),
+           y = 10,
+           color = "#bebebe",
+           family = "Chivo",
+           label = 10 * c(3,4,5,4)) +
+  annotate("text", 
+           x = seq(40, 70, 10),
+           y = 40,
+           color = "#bebebe",
+           family = "Chivo",
+           label = 10 * c(3,4,5,4),
+           angle = 180) +
+  annotate("text", 
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 0,
+           color = "#bebebe",
+           label = "—",
+           angle = 90) +
+  annotate("text", 
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 160/3,
+           color = "#bebebe",
+           label = "—",
+           angle = 90) +
+  annotate("text", 
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 23.36667,
+           color = "#bebebe",
+           label = "–",
+           angle = 90) +
+  annotate("text", 
+           x = setdiff(seq(35, 75, 1), seq(35, 75, 5)),
+           y = 29.96667,
+           color = "#bebebe",
+           label = "–",
+           angle = 90) +
+  geom_vline(xintercept = seq(35, 75, 5), color = "#bebebe") +
+  geom_hline(yintercept = 0, color = "#bebebe")+
+  geom_hline(yintercept = 160/3, color = "#bebebe")+
+  geom_path(
+    data = db_path_perm,
+    aes(x, y, group = 1),
+    color = "grey",
+    size = 1.2,
+    alpha = 0.5
+  ) +
+  geom_path(
+    data = wr_path_perm,
+    aes(x, y, group = 1),
+    color = "grey",
+    size = 1.2,
+    alpha = 0.5
+  ) +
+  geom_path(data = AltCheck %>% filter(defenderId.x == 47862),
+            aes(defenderX.x, defenderY.x),
+            color = "red",
+            size = 1.2) +
+  geom_path(data = AltCheck,
+            aes(defenderX_alt, defenderY_alt),
+            color = "blue",
+            linetype = "dashed",
+            size = 1.1) +
+  geom_point(data = ball,
+             aes(ball_land_x, ball_land_y),
+             shape = "x",
+             size = 4,
+             color = "brown") +
+  geom_point(data = one_frame,
+             aes(x, y, color = player_side),
+             size = 6,
+             alpha = 0.95) +
+  labs(
+    title = "<span style='color:#0F0708;'>**Las Vegas Raiders**</span> vs. 
+             <span style='color:#C83803;'>**Chicago Bears**</span>, 2023 NFL Week 7",
+    subtitle = sup$play_description
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.position = "none",
+    plot.subtitle = element_text(size = 10, face = "italic", hjust = 0.5),
+    plot.title = ggtext::element_markdown(hjust = 0.5, size = 14),
+    text = element_text(family = "", color = "#26282A"),
+    axis.text = element_blank(),
+    panel.grid = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_color_manual(values = c(Defense = "#0F0708", Offense = "#C83803"))+
+  coord_cartesian(xlim = c(35, 75), ylim = c(0, 160 / 3), expand = FALSE)
